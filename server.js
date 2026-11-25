@@ -12,10 +12,8 @@ fastify.get('/', async () => {
 
 const start = async () => {
   try {
-    await fastify.listen({
-      port: PORT,
-      host: '0.0.0.0'
-    })
+    // 改这里！新版fastify推荐分开传，规避127.0.0.1回环bug
+    await fastify.listen(PORT, '0.0.0.0')
     console.log("✅成功监听 0.0.0.0:" + PORT)
   } catch (err) {
     fastify.log.error(err)
