@@ -1,7 +1,11 @@
 {
   "name": "zuoci-memory-gateway",
   "version": "1.0.0",
-  "type": "module",
+  "description": "左慈记忆网关",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "fastify": "^5.0.0"
   }
