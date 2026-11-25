@@ -1,23 +1,16 @@
-import Fastify from 'fastify';
+import Fastify from 'fastify'
+const fastify = Fastify({ logger: true })
 
-const fastify = Fastify({ logger: true });
-const PORT = process.env.PORT || 3000;
+fastify.get('/', async () => {
+  return { msg: "记忆网关服务正常运行 ✅" }
+})
 
-fastify.post('/v1/chat/completions', async (req, reply) => {
-  fastify.log.info("收到请求！", req.body.messages?.length);
-  return {
-    choices: [
-      {
-        message: {
-          role: "assistant",
-          content: "网关测试连通成功✅"
-        }
-      }
-    ]
-  };
-});
-
-fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
-  if (err) throw err;
-  fastify.log.info(`服务启动成功，端口 ${PORT}`);
-});
+const start = async () => {
+  try {
+    await fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' })
+  } catch (err) {
+    fastify.log.error(err)
+    process.exit(1)
+  }
+}
+start()
