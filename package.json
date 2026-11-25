@@ -3,12 +3,6 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "fastify": "^5.0.0",
-    "undici": "^6.0.0",
-    "better-sqlite3": "^11.0.0",
-    "p-limit": "^6.0.0"
-  },
-  "scripts": {
-    "start": "node server.js"
+    "fastify": "^5.0.0"
   }
 }
