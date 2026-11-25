@@ -1,16 +1,14 @@
-import Fastify from 'fastify'
-const fastify = Fastify({ logger: true })
+const fastify = require('fastify')({ logger: true })
+const PORT = process.env.PORT || 8080
 
 fastify.get('/', async () => {
-  return { msg: "记忆网关服务正常运行 ✅" }
+  return { msg: "Memory Gateway Alive ✅" }
 })
 
-const start = async () => {
-  try {
-    await fastify.listen({ port: process.env.PORT || 3000, host: '0.0.0.0' })
-  } catch (err) {
+fastify.listen({ host: '0.0.0.0', port: PORT }, (err) => {
+  if (err) {
     fastify.log.error(err)
     process.exit(1)
   }
-}
-start()
+  console.log(`Server listening on 0.0.0.0:${PORT}`)
+})
