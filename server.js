@@ -1,5 +1,4 @@
 const fastify = require('fastify')({ logger: true })
-const fastify = require('fastify')({ logger: true })
 
 console.log("==== ENV DEBUG ====")
 console.log("process.env.PORT =", process.env.PORT)
