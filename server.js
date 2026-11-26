@@ -367,3 +367,4 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
   if (err) throw err;
   fastify.log.info(`服务启动成功，端口 ${PORT}`);
 });
+
