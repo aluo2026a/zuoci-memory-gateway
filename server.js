@@ -1,5 +1,6 @@
-// 左慈记忆网关 · 阶段1 写入链路
+// 左慈记忆网关 · 阶段2 写入链路（对接 Ombre MCP）
 // 链路：POST /transcript → 调硅流 Qwen3-8B 管家 → schema 校验 → 分流（正式库 / pending / skip）
+// candidate 经校验后调 Ombre MCP hold 写入向量库；本地 memory.json 作离线快照与同步状态台账。
 // 检索重写、软合并、元记忆候选、注入层后续阶段再补。
 
 import Fastify from 'fastify';
@@ -20,6 +21,14 @@ const SILICONFLOW_API_KEY = process.env.SILICONFLOW_API_KEY || '';
 const BUTLER_MODEL = process.env.BUTLER_MODEL || 'Qwen/Qwen3-8B';
 const BUTLER_TEMPERATURE = parseFloat(process.env.BUTLER_TEMPERATURE || '0.1');
 const BUTLER_MAX_TOKENS = parseInt(process.env.BUTLER_MAX_TOKENS || '1024', 10);
+
+// ---------- Ombre MCP 对接 ----------
+const OMBRE_MCP_ENDPOINT = process.env.OMBRE_MCP_ENDPOINT || '';
+const OMBRE_MCP_TOKEN = process.env.OMBRE_MCP_TOKEN || '';
+// 未配 endpoint 时退化为仅本地快照（开发兜底）；配了才走远端写入。
+const OMBRE_WRITE_ENABLED = Boolean(OMBRE_MCP_ENDPOINT && OMBRE_MCP_TOKEN);
+// high/mild → Ombre importance（1-10，默认 5）
+const IMPORTANCE_BY_CATEGORY = { high: 7, mild: 5 };
 
 // ---------- 存储初始化 ----------
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -183,6 +192,60 @@ async function callButler(content, turnId) {
   return JSON.parse(text);
 }
 
+// ---------- Ombre MCP 调用 ----------
+// 解析 streamable-http 响应：兼容纯 JSON 与 SSE（data: 行包裹）两种形态。
+function parseMcpBody(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) throw new Error('Ombre 返回空响应');
+  if (text.startsWith('{')) return JSON.parse(text);
+  // SSE：抽取所有 data: 行拼接后解析
+  const dataLines = text.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim());
+  if (dataLines.length) return JSON.parse(dataLines.join('\n'));
+  return JSON.parse(text);
+}
+
+async function mcpCallTool(toolName, args) {
+  const resp = await fetch(OMBRE_MCP_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OMBRE_MCP_TOKEN}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method: 'tools/call',
+      params: { name: toolName, arguments: args },
+    }),
+  });
+  const rawText = await resp.text();
+  const json = parseMcpBody(rawText);
+  if (json?.error) throw new Error(`Ombre RPC 错误: ${json.error.message || JSON.stringify(json.error)}`);
+  const result = json?.result;
+  if (result?.isError) {
+    const msg = result?.content?.map((c) => c.text).filter(Boolean).join(' ') || 'Ombre 工具返回 isError';
+    throw new Error(msg);
+  }
+  const textOut = result?.content?.map((c) => c.text).filter(Boolean).join('\n') || '';
+  return { text: textOut, structured: result?.structuredContent?.result };
+}
+
+// 把网关候选条目写入 Ombre 向量库（hold）。返回 { bucket_id, raw }。
+async function callOmbreHold(memory) {
+  const importance = IMPORTANCE_BY_CATEGORY[memory.category] ?? 5;
+  const args = {
+    content: memory.content,
+    tags: (memory.anchors || []).join(','),
+    importance,
+    why_remembered: `source_turn_id:${memory.source_turn_id}; category:${memory.category}`,
+  };
+  const { text } = await mcpCallTool('hold', args);
+  const idMatch = text.match(/(?:新建|合并)→([0-9a-f]{8,})/);
+  const bucketId = idMatch ? idMatch[1] : '';
+  return { bucket_id: bucketId, raw: text };
+}
+
 // ---------- 服务 ----------
 const fastify = Fastify({ logger: true });
 
@@ -225,13 +288,59 @@ fastify.post('/transcript', async (req, reply) => {
       id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       ts: Date.now(),
       ...m,
+      ombre_id: null,
+      ombre_synced: false,
+      ombre_error: null,
       hard_signal_words: [],
       merged_from: [],
       superseded_by: null,
     }));
+
+    let synced = 0;
+    let failed = 0;
+    if (OMBRE_WRITE_ENABLED) {
+      for (const entry of stamped) {
+        try {
+          const { bucket_id, raw } = await callOmbreHold(entry);
+          entry.ombre_id = bucket_id;
+          entry.ombre_synced = true;
+          entry.ombre_raw = raw;
+          synced += 1;
+        } catch (e) {
+          entry.ombre_synced = false;
+          entry.ombre_error = String(e.message || e);
+          failed += 1;
+          fastify.log.error({ err: entry.ombre_error, turn_id: entry.source_turn_id }, 'Ombre hold 写入失败');
+          appendJsonl(PENDING_FILE, {
+            ts: Date.now(),
+            turn_id: entry.source_turn_id,
+            reason: 'ombre_hold_failed',
+            detail: entry.ombre_error,
+            memory: entry,
+          });
+        }
+      }
+    } else {
+      fastify.log.warn('OMBRE_MCP_ENDPOINT/TOKEN 未配置，candidate 仅写本地快照');
+    }
+
     mem.push(...stamped);
     writeJson(MEMORY_FILE, mem);
-    return reply.send({ ok: true, decision: 'candidate', stored: stamped.length });
+
+    return reply.send({
+      ok: true,
+      decision: 'candidate',
+      stored: stamped.length,
+      ombre_enabled: OMBRE_WRITE_ENABLED,
+      synced,
+      failed,
+      entries: stamped.map((e) => ({
+        source_turn_id: e.source_turn_id,
+        ombre_id: e.ombre_id,
+        ombre_synced: e.ombre_synced,
+        category: e.category,
+      })),
+    });
   }
 
   if (rawObj.decision === 'invalid' || rawObj.conflict) {
