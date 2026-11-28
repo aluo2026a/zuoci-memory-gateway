@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { proxyChatCompletions } from './proxy.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -251,6 +252,9 @@ const fastify = Fastify({ logger: true });
 
 // 鉴权（未配置 key 时本地调试放行并告警）
 fastify.addHook('preHandler', async (req, reply) => {
+  // 代理链路自带 PROXY_API_KEY 鉴权，跳过本网关的 x-gateway-key 校验
+  if ((req.url || '').split('?')[0] === '/v1/chat/completions') return;
+
   if (!GATEWAY_API_KEY) {
     fastify.log.warn('GATEWAY_API_KEY 未配置，鉴权放行（仅本地调试）');
     return;
@@ -261,6 +265,13 @@ fastify.addHook('preHandler', async (req, reply) => {
 
 // 存活检测
 fastify.get('/', async () => ({ msg: 'Memory Gateway Alive ✅' }));
+
+// 代理透传：Kelivo 客户端 → /v1/chat/completions → DeepSeek（SSE 流式支持）
+fastify.route({
+  method: ['POST'],
+  url: '/v1/chat/completions',
+  handler: proxyChatCompletions,
+});
 
 // 写入入口
 fastify.post('/transcript', async (req, reply) => {
@@ -367,4 +378,3 @@ fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
   if (err) throw err;
   fastify.log.info(`服务启动成功，端口 ${PORT}`);
 });
-
