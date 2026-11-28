@@ -18,15 +18,31 @@
  *  - UPSTREAM_BASE_PATH 可选：默认 /v1
  *  - INJECT_MODE        可选：passthrough（默认，不注入）| demo（注入测试记忆）
  *
- * 关键说明（不再使用 reply.hijack）：
- *  - Fastify 在解析阶段会把 application/json 的 body 解析到 request.body，直接用它。
- *  - 响应用 Fastify 原生的 reply.send(stream) 透传 SSE，避免 hijack 与框架抢响应
- *    导致的 FST_ERR_REP_ALREADY_SENT。
+ * 关键说明：
+ *  - Fastify 会把 application/json 的 body 解析到 request.body，直接用它。
+ *  - 响应用 Fastify 原生 reply.send(stream) 透传 SSE，不使用 reply.hijack，
+ *    避免与框架抢响应导致的 FST_ERR_REP_ALREADY_SENT。
+ *  - 所有放进 HTTP Header 的敏感值（Authorization 等）都经过 sanitizeHeaderValue
+ *    严格清洗，避免混入换行/制表符/非 ASCII 字符导致
+ *    "Invalid character in header content"。
  */
 
 import https from 'node:https';
 
-const PROXY_API_KEY = (process.env.PROXY_API_KEY || '').trim();
+/**
+ * 严格清洗 Header 值：
+ *  1) 去掉所有 \r \n \t（任意位置，不只是首尾）
+ *  2) trim 首尾空白
+ *  3) 只保留可打印 ASCII（0x20-0x7E），过滤掉全角空格、BOM 等隐藏字符
+ */
+function sanitizeHeaderValue(value) {
+  return String(value ?? '')
+    .replace(/[\r\n\t]/g, '')
+    .trim()
+    .replace(/[^\x20-\x7E]/g, '');
+}
+
+const PROXY_API_KEY = sanitizeHeaderValue(process.env.PROXY_API_KEY || '');
 const INJECT_MODE = (process.env.INJECT_MODE || 'passthrough').trim();
 const UPSTREAM_HOST = (process.env.UPSTREAM_HOST || 'api.deepseek.com').trim();
 const UPSTREAM_BASE_PATH = (process.env.UPSTREAM_BASE_PATH || '/v1').replace(/\/+$/, '');
@@ -46,7 +62,8 @@ if (INJECT_MODE === 'demo') {
 function extractBearerToken(headers) {
   const auth = headers['authorization'] || '';
   const match = /^Bearer\s+(.+)$/i.exec(auth);
-  return match ? match[1].trim() : auth.trim();
+  const raw = match ? match[1] : auth;
+  return sanitizeHeaderValue(raw);
 }
 
 function sendError(reply, statusCode, message) {
@@ -97,7 +114,7 @@ export function proxyChatCompletions(request, reply) {
     return;
   }
 
-  const upstreamApiKey = (process.env.UPSTREAM_API_KEY || process.env.DEEPSEEK_API_KEY || '').trim();
+  const upstreamApiKey = sanitizeHeaderValue(process.env.UPSTREAM_API_KEY || process.env.DEEPSEEK_API_KEY || '');
   if (!upstreamApiKey) {
     console.error('[proxy] DEEPSEEK_API_KEY 未配置，无法转发到上游');
     sendError(reply, 503, 'DEEPSEEK_API_KEY is not configured on the gateway');
@@ -124,7 +141,8 @@ export function proxyChatCompletions(request, reply) {
     upstreamHeaders[key] = value;
   }
   upstreamHeaders['Host'] = UPSTREAM_HOST;
-  upstreamHeaders['Authorization'] = 'Bearer ' + upstreamApiKey;
+  // 关键：Authorization 拼完后，再做一次 ASCII 过滤，确保不含非法字符
+  upstreamHeaders['Authorization'] = sanitizeHeaderValue('Bearer ' + upstreamApiKey);
   upstreamHeaders['Content-Length'] = body.length;
 
   // 4) 转发到上游 DeepSeek，用 reply.send(stream) 透传响应
