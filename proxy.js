@@ -20,9 +20,9 @@
  *
  * 关键说明：
  *  - Fastify 会在解析阶段消费 application/json 的 body 并放入 request.body，
- *    因此这里直接用 request.body（解析好的对象），不去读 request.raw 流，
- *    避免与框架抢流导致 req.on('end') 永远等不到而挂起。
- *  - 响应侧仍用 reply.hijack() 接管，才能做 SSE 流式透传。
+ *    因此这里直接用 request.body（解析好的对象），不去读 request.raw 流。
+ *  - 响应侧用 reply.hijack() 接管做 SSE 透传；hijack 之后必须「非 async」并
+ *    立即 return reply，阻止 Fastify 后续的自动 send（否则会 FST_ERR_REP_ALREADY_SENT）。
  */
 
 import https from 'node:https';
@@ -85,29 +85,31 @@ function injectDemoMemory(bodyObj) {
 }
 
 /**
- * Fastify 路由处理器。
- * 注意：必须先 reply.hijack()，Fastify 才不会再去管理这条响应（用于 SSE 透传）。
+ * 实际转发逻辑（非 async）。
+ * request：Fastify 的 request（用 request.body / request.headers）。
+ * res：reply.raw（Node 原生 ServerResponse）。
  */
-export function proxyChatCompletions(request, reply) {
-  reply.hijack();
-  const res = reply.raw;
+function handleChatCompletions(request, res) {
   const headers = request.headers;
 
   // 1) PROXY_API_KEY 鉴权
   if (!PROXY_API_KEY) {
     console.error('[proxy] PROXY_API_KEY 未配置，拒绝请求（fail-closed）');
-    return sendJson(res, 503, { error: { message: 'PROXY_API_KEY is not configured on the gateway' } });
+    sendJson(res, 503, { error: { message: 'PROXY_API_KEY is not configured on the gateway' } });
+    return;
   }
   const token = extractBearerToken(headers);
   if (!token || token !== PROXY_API_KEY) {
     console.warn('[proxy] 鉴权失败');
-    return sendJson(res, 401, { error: { message: 'Unauthorized: invalid or missing proxy API key' } });
+    sendJson(res, 401, { error: { message: 'Unauthorized: invalid or missing proxy API key' } });
+    return;
   }
 
   const upstreamApiKey = (process.env.UPSTREAM_API_KEY || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!upstreamApiKey) {
     console.error('[proxy] DEEPSEEK_API_KEY 未配置，无法转发到上游');
-    return sendJson(res, 503, { error: { message: 'DEEPSEEK_API_KEY is not configured on the gateway' } });
+    sendJson(res, 503, { error: { message: 'DEEPSEEK_API_KEY is not configured on the gateway' } });
+    return;
   }
 
   // 2) 组装请求体：Fastify 已把 application/json 解析到 request.body，直接用
@@ -174,4 +176,14 @@ export function proxyChatCompletions(request, reply) {
 
   upstreamReq.write(body);
   upstreamReq.end();
+}
+
+/**
+ * Fastify 路由处理器（必须非 async）。
+ * reply.hijack() 接管响应后，立即 return reply，阻止 Fastify 自动 send。
+ */
+export function proxyChatCompletions(request, reply) {
+  reply.hijack();
+  handleChatCompletions(request, reply.raw);
+  return reply;
 }
