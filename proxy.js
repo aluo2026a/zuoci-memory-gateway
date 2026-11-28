@@ -18,11 +18,12 @@
  *  - UPSTREAM_BASE_PATH 可选：默认 /v1
  *  - INJECT_MODE        可选：passthrough（默认，不注入）| demo（注入测试记忆）
  *
- * 关键说明：
+ * 关键说明（重要，避免 FST_ERR_REP_ALREADY_SENT）：
  *  - Fastify 会在解析阶段消费 application/json 的 body 并放入 request.body，
  *    因此这里直接用 request.body（解析好的对象），不去读 request.raw 流。
- *  - 响应侧用 reply.hijack() 接管做 SSE 透传；hijack 之后必须「非 async」并
- *    立即 return reply，阻止 Fastify 后续的自动 send（否则会 FST_ERR_REP_ALREADY_SENT）。
+ *  - 响应侧用 reply.hijack() 接管做 SSE 透传。hijack 之后 reply.sent 恒为 true，
+ *    所以 handler 必须返回 undefined（什么都不返回），让 Fastify 跳过
+ *    preHandlerCallbackInner 里的 reply.send(result)，否则会抛 FST_ERR_REP_ALREADY_SENT。
  */
 
 import https from 'node:https';
@@ -180,10 +181,11 @@ function handleChatCompletions(request, res) {
 
 /**
  * Fastify 路由处理器（必须非 async）。
- * reply.hijack() 接管响应后，立即 return reply，阻止 Fastify 自动 send。
+ * reply.hijack() 接管响应后，必须返回 undefined（什么都不返回），
+ * 让 Fastify 跳过 reply.send()，否则会抛 FST_ERR_REP_ALREADY_SENT。
  */
 export function proxyChatCompletions(request, reply) {
   reply.hijack();
   handleChatCompletions(request, reply.raw);
-  return reply;
+  return undefined;
 }
