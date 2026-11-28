@@ -46,8 +46,9 @@ const UPSTREAM_BASE_PATH = (process.env.UPSTREAM_BASE_PATH || '/v1').replace(/\/
 
 const UPSTREAM_TIMEOUT_MS = 300000; // 上游 5 分钟无数据才超时
 
-const DEMO_MEMORY = '【过往史实，非当前对话】雪落之日，他曾为阿洛系稳绳结，话很少。';
-const MEMORY_PREFIX = '【过往史实，非当前对话】';
+const MEMORY_WRAPPER_HEAD = `（这里有一段你心底浮现的旧事。请注意：这是发生在很久以前的回忆，并非当前正在发生的事。不要直接复述这段往事，只需让它影响你当下的心境、神态或台词。）
+旧事片段：`;
+const DEMO_MEMORY = MEMORY_WRAPPER_HEAD + '雪落之日，他曾为阿洛系稳绳结，话很少。';
 
 if (INJECT_MODE === 'demo') {
   console.log('[proxy] demo 模式已启用：注入测试记忆');
@@ -153,7 +154,7 @@ export async function proxyChatCompletions(request, reply) {
     if (query) {
       const { success, payload } = await queryOmbreMemory(query);
       if (success && payload) {
-        bodyObj = prependToLastUser(bodyObj, MEMORY_PREFIX + '\n' + payload);
+        bodyObj = prependToLastUser(bodyObj, MEMORY_WRAPPER_HEAD + payload);
         memoryInjected = true;
       }
     }
