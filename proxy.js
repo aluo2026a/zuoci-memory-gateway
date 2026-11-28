@@ -1,5 +1,5 @@
 /**
- * proxy.js — 最小透传代理（先把链路跑通，暂不做记忆注入）
+ * proxy.js — 最小透传代理（支持 demo 模式做记忆注入演示）
  *
  * 职责：
  *  1. 接收 Kelivo 客户端发来的 POST /v1/chat/completions 请求
@@ -7,7 +7,8 @@
  *  3. 将请求体与其它头部原样转发到上游 DeepSeek API，
  *     并把 Authorization 替换为 DEEPSEEK_API_KEY
  *  4. 支持 SSE 流式透传（stream: true）
- *  5. 在所有响应头写入 X-Proxy-Memory-Injected: false
+ *  5. INJECT_MODE=demo 时：把测试记忆拼接到最后一条 user 消息前，
+ *     并返回 X-Proxy-Memory-Injected: true；否则返回 false
  *
  * 环境变量：
  *  - PROXY_API_KEY      必填：客户端访问本网关用的 Key
@@ -15,7 +16,7 @@
  *  - UPSTREAM_API_KEY   可选：覆盖上游 Key（默认取 DEEPSEEK_API_KEY）
  *  - UPSTREAM_HOST      可选：默认 api.deepseek.com
  *  - UPSTREAM_BASE_PATH 可选：默认 /v1
- *  - INJECT_MODE        可选：默认 passthrough（预留，当前不注入记忆）
+ *  - INJECT_MODE        可选：passthrough（默认，不注入）| demo（注入测试记忆）
  *
  * 说明：本文件是 ESM（与项目 package.json 的 "type": "module" 保持一致）。
  *  raw 逻辑直接操作 Node 原生的 request/response，方便 Fastify 用 reply.hijack() 接管。
@@ -31,8 +32,14 @@ const UPSTREAM_BASE_PATH = (process.env.UPSTREAM_BASE_PATH || '/v1').replace(/\/
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 请求体上限 10MB
 const UPSTREAM_TIMEOUT_MS = 300000;       // 5 分钟无数据才超时（推理模型首 token 可能较慢）
 
-if (INJECT_MODE !== 'passthrough') {
-  console.warn('[proxy] INJECT_MODE=' + INJECT_MODE + '（当前版本仅支持 passthrough，不做记忆注入）');
+// demo 模式要注入的测试记忆（拼接在最后一条 user 消息内容最前面）
+const DEMO_MEMORY = '【过往史实，非当前对话】雪落之日，他曾为阿洛系稳绳结，话很少。';
+const MEMORY_INJECTED = INJECT_MODE === 'demo';
+
+if (INJECT_MODE === 'demo') {
+  console.log('[proxy] demo 模式已启用：注入测试记忆，响应头返回 X-Proxy-Memory-Injected: true');
+} else if (INJECT_MODE !== 'passthrough') {
+  console.warn('[proxy] 未知 INJECT_MODE=' + INJECT_MODE + '，按 passthrough 处理');
 }
 
 function extractBearerToken(req) {
@@ -49,6 +56,33 @@ function sendJson(res, statusCode, payload) {
     'X-Proxy-Memory-Injected': 'false',
   });
   res.end(body);
+}
+
+/**
+ * demo 模式：把测试记忆拼接到请求体里最后一条 user 消息的内容最前面。
+ * 返回修改后的 body Buffer；非 demo 或解析失败时返回原样 Buffer。
+ */
+function injectDemoMemory(bodyBuffer) {
+  if (!MEMORY_INJECTED) return bodyBuffer;
+  try {
+    const parsed = JSON.parse(bodyBuffer.toString('utf8'));
+    if (parsed && Array.isArray(parsed.messages)) {
+      for (let i = parsed.messages.length - 1; i >= 0; i--) {
+        const msg = parsed.messages[i];
+        if (msg && msg.role === 'user') {
+          if (typeof msg.content === 'string') {
+            msg.content = DEMO_MEMORY + '\n\n' + msg.content;
+            console.log('[proxy] demo 记忆已注入最后一条 user 消息');
+          }
+          break;
+        }
+      }
+      return Buffer.from(JSON.stringify(parsed), 'utf8');
+    }
+  } catch (err) {
+    console.error('[proxy] demo 注入失败，按原样转发：', err.message);
+  }
+  return bodyBuffer;
 }
 
 /**
@@ -101,6 +135,7 @@ export function handleChatCompletions(req, res) {
       return sendJson(res, 413, { error: { message: 'Request body too large (max 10MB)' } });
     }
     const body = Buffer.concat(chunks);
+    const forwardedBody = injectDemoMemory(body);
 
     // 原样透传请求头，剔除需要重写的头
     const upstreamHeaders = {};
@@ -116,7 +151,7 @@ export function handleChatCompletions(req, res) {
     }
     upstreamHeaders['Host'] = UPSTREAM_HOST;
     upstreamHeaders['Authorization'] = 'Bearer ' + upstreamApiKey;
-    upstreamHeaders['Content-Length'] = body.length;
+    upstreamHeaders['Content-Length'] = forwardedBody.length;
 
     const upstreamReq = https.request(
       {
@@ -135,7 +170,7 @@ export function handleChatCompletions(req, res) {
           if (['content-length', 'transfer-encoding', 'connection', 'keep-alive'].includes(lower)) continue;
           responseHeaders[key] = value;
         }
-        responseHeaders['X-Proxy-Memory-Injected'] = 'false';
+        responseHeaders['X-Proxy-Memory-Injected'] = MEMORY_INJECTED ? 'true' : 'false';
 
         res.writeHead(upstreamRes.statusCode || 502, responseHeaders);
         upstreamRes.pipe(res);
@@ -156,7 +191,7 @@ export function handleChatCompletions(req, res) {
       upstreamReq.destroy(new Error('upstream idle timeout'));
     });
 
-    upstreamReq.write(body);
+    upstreamReq.write(forwardedBody);
     upstreamReq.end();
   });
 }
