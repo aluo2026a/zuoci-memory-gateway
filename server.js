@@ -271,6 +271,7 @@ fastify.route({
   method: ['POST'],
   url: '/v1/chat/completions',
   handler: proxyChatCompletions,
+  bodyLimit: 10 * 1024 * 1024, // 10MB：允许长对话历史（Fastify 解析 body 时使用）
 });
 
 // 写入入口
