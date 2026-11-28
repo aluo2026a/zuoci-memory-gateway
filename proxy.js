@@ -46,9 +46,33 @@ const UPSTREAM_BASE_PATH = (process.env.UPSTREAM_BASE_PATH || '/v1').replace(/\/
 
 const UPSTREAM_TIMEOUT_MS = 300000; // 上游 5 分钟无数据才超时
 
-const MEMORY_WRAPPER_HEAD = `（这里有一段你心底浮现的旧事。请注意：这是发生在很久以前的回忆，并非当前正在发生的事。不要直接复述这段往事，只需让它影响你当下的心境、神态或台词。）
-旧事片段：`;
-const DEMO_MEMORY = MEMORY_WRAPPER_HEAD + '雪落之日，他曾为阿洛系稳绳结，话很少。';
+// 把记忆里的第三人称转成第二人称（你=阿洛）和第一人称（吾=左慈）
+function toSecondPerson(text) {
+  return String(text || '')
+    .replace(/阿洛/g, '你')
+    .replace(/左慈/g, '吾')
+    .replace(/她/g, '你')
+    .replace(/他/g, '吾');
+}
+
+// 把记忆做成极简第一人称状态残片：（记忆内容）
+// 超过 60 字时，尽量在前 60 字内找最后一个句号/逗号截断，避免切成半个句子
+function buildFragment(memoryText) {
+  const text = String(memoryText || '');
+  if (text.length <= 60) {
+    return '（' + text + '）';
+  }
+  const slice = text.slice(0, 60);
+  let cut = -1;
+  for (const p of ['。', '！', '？', '；', '，', '、']) {
+    const idx = slice.lastIndexOf(p);
+    if (idx > cut) cut = idx;
+  }
+  const fragment = cut >= 0 ? slice.slice(0, cut + 1) : slice;
+  return '（' + fragment + '）';
+}
+
+const DEMO_MEMORY_TEXT = '雪落之日，吾曾为你系稳绳结，话很少。';
 
 if (INJECT_MODE === 'demo') {
   console.log('[proxy] demo 模式已启用：注入测试记忆');
@@ -82,14 +106,14 @@ function getLastUserContent(bodyObj) {
   return '';
 }
 
-/** 把 text 拼到最后一个 user 消息 content 的最前面。 */
-function prependToLastUser(bodyObj, text) {
-  if (!bodyObj || !Array.isArray(bodyObj.messages) || !text) return bodyObj;
+/** 在最后一条 user 消息之前，插入一条 assistant 潜意识残片；user 消息保持原样。 */
+function insertAssistantMemory(bodyObj, fragment) {
+  if (!bodyObj || !Array.isArray(bodyObj.messages) || !fragment) return bodyObj;
   for (let i = bodyObj.messages.length - 1; i >= 0; i--) {
     const m = bodyObj.messages[i];
-    if (m && m.role === 'user' && typeof m.content === 'string') {
-      m.content = text + '\n\n' + m.content;
-      console.log('[proxy] 记忆已注入最后一条 user 消息');
+    if (m && m.role === 'user') {
+      bodyObj.messages.splice(i, 0, { role: 'assistant', content: fragment });
+      console.log('[proxy] 已插入 assistant 潜意识残片');
       break;
     }
   }
@@ -147,14 +171,14 @@ export async function proxyChatCompletions(request, reply) {
   let memoryInjected = false;
 
   if (INJECT_MODE === 'demo') {
-    bodyObj = prependToLastUser(bodyObj, DEMO_MEMORY);
+    bodyObj = insertAssistantMemory(bodyObj, buildFragment(DEMO_MEMORY_TEXT));
     memoryInjected = true;
   } else if (INJECT_MODE === 'ombre') {
     const query = getLastUserContent(bodyObj);
     if (query) {
       const { success, payload } = await queryOmbreMemory(query);
       if (success && payload) {
-        bodyObj = prependToLastUser(bodyObj, MEMORY_WRAPPER_HEAD + payload);
+        bodyObj = insertAssistantMemory(bodyObj, buildFragment(toSecondPerson(payload)));
         memoryInjected = true;
       }
     }
